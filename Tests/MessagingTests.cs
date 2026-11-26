@@ -1,8 +1,6 @@
 using System.Data.Common;
 using System.Text.Json;
-using Base.Contracts.DTO;
 using Base.Contracts.Message;
-using Base.DTO;
 using Base.Message;
 using Contracts.Application;
 using Domain;
@@ -109,15 +107,15 @@ public class RabbitMqEventPublisherTests
 
 public class RabbitMqEventHandlerTests
 {
-    private FakeAppUserService _appUserService = default!;
+    private FakeIdentityEventHandler _identityEventHandler = default!;
     private RabbitMqEventHandler _handler = default!;
 
     [SetUp]
     public void SetUp()
     {
-        _appUserService = new FakeAppUserService();
+        _identityEventHandler = new FakeIdentityEventHandler();
         var provider = new ServiceCollection()
-            .AddScoped<IAppUserService>(_ => _appUserService)
+            .AddScoped<IIdentityEventHandler>(_ => _identityEventHandler)
             .BuildServiceProvider();
         _handler = new RabbitMqEventHandler(
             provider.GetRequiredService<IServiceScopeFactory>(),
@@ -129,59 +127,75 @@ public class RabbitMqEventHandlerTests
         return BaseEventEnvelope<JsonElement>.Create(source, "my-realm", action, contentVersion, JsonSerializer.SerializeToElement(content));
     }
 
-    [TestCase("user-created")]
-    [TestCase("user-updated")]
-    [TestCase("user-enabled")]
-    [TestCase("user-disabled")]
-    public async Task HandleAsync_IdentityUserEvent_SyncsUserWithMessageIdAndAcks(string action)
+    [Test]
+    public async Task HandleAsync_IdentityEvent_PassesEnvelopeFieldsAndParsedUser()
     {
         var userId = Guid.NewGuid();
-        var envelope = Envelope(DefaultSources.IdentityHub, action,
+        var envelope = Envelope(DefaultSources.IdentityHub, "user-updated",
             new { userId, email = " user@example.com ", username = "user", fullName = "Full Name", locale = "en-GB", timeZone = "Europe/London" });
 
-        var disposition = await _handler.HandleAsync(envelope, CancellationToken.None);
+        await _handler.HandleAsync(envelope, CancellationToken.None);
 
         Assert.Multiple(() =>
         {
-            Assert.That(disposition, Is.EqualTo(MessageDisposition.Ack));
-            Assert.That(_appUserService.MessageId, Is.EqualTo(Guid.Parse(envelope.Id)));
-            Assert.That(_appUserService.Synced?.Id, Is.EqualTo(userId));
-            Assert.That(_appUserService.Synced?.Email, Is.EqualTo("user@example.com"));
-            Assert.That(_appUserService.Synced?.Locale, Is.EqualTo("en-GB"));
-            Assert.That(_appUserService.Synced?.TimeZone, Is.EqualTo("Europe/London"));
+            Assert.That(_identityEventHandler.MessageId, Is.EqualTo(envelope.Id));
+            Assert.That(_identityEventHandler.Action, Is.EqualTo("user-updated"));
+            Assert.That(_identityEventHandler.ContentVersion, Is.EqualTo("1.0"));
+            Assert.That(_identityEventHandler.AppUser?.Id, Is.EqualTo(userId));
+            Assert.That(_identityEventHandler.AppUser?.Email, Is.EqualTo("user@example.com"));
+            Assert.That(_identityEventHandler.AppUser?.Locale, Is.EqualTo("en-GB"));
+            Assert.That(_identityEventHandler.AppUser?.TimeZone, Is.EqualTo("Europe/London"));
         });
     }
 
     [Test]
-    public async Task HandleAsync_IdentityUserDeleted_RemovesUserAndAcks()
+    public async Task HandleAsync_InvalidUserId_PassesNoUser()
     {
-        var userId = Guid.NewGuid();
-
-        var disposition = await _handler.HandleAsync(Envelope(DefaultSources.IdentityHub, "user-deleted", new { userId }), CancellationToken.None);
+        await _handler.HandleAsync(
+            Envelope(DefaultSources.IdentityHub, "user-created", new { userId = "not-a-guid" }),
+            CancellationToken.None);
 
         Assert.Multiple(() =>
         {
-            Assert.That(disposition, Is.EqualTo(MessageDisposition.Ack));
-            Assert.That(_appUserService.RemovedId, Is.EqualTo(userId));
+            Assert.That(_identityEventHandler.Called, Is.True);
+            Assert.That(_identityEventHandler.AppUser, Is.Null);
         });
     }
 
     [Test]
-    public async Task HandleAsync_DuplicateMessage_Acks()
+    public async Task HandleAsync_ContentOfWrongShape_PassesNoUser()
     {
-        _appUserService.Result = MethodResponse<bool>.Success(false);
+        await _handler.HandleAsync(
+            Envelope(DefaultSources.IdentityHub, "user-created", new { userId = 42 }),
+            CancellationToken.None);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(_identityEventHandler.Called, Is.True);
+            Assert.That(_identityEventHandler.AppUser, Is.Null);
+        });
+    }
+
+    [TestCase(MessageHandlingResult.Applied, MessageDisposition.Ack)]
+    [TestCase(MessageHandlingResult.AlreadyProcessed, MessageDisposition.Ack)]
+    [TestCase(MessageHandlingResult.Ignored, MessageDisposition.Ack)]
+    [TestCase(MessageHandlingResult.Retry, MessageDisposition.Requeue)]
+    [TestCase(MessageHandlingResult.Reject, MessageDisposition.Reject)]
+    public async Task HandleAsync_MapsHandlingResultToDisposition(MessageHandlingResult result, MessageDisposition expected)
+    {
+        _identityEventHandler.Result = result;
 
         var disposition = await _handler.HandleAsync(
             Envelope(DefaultSources.IdentityHub, "user-created", new { userId = Guid.NewGuid() }),
             CancellationToken.None);
 
-        Assert.That(disposition, Is.EqualTo(MessageDisposition.Ack));
+        Assert.That(disposition, Is.EqualTo(expected));
     }
 
     [Test]
     public async Task HandleAsync_TransientDatabaseFailure_Requeues()
     {
-        _appUserService.Exception = new InvalidOperationException("wrapped", new FakeDbException(isTransient: true));
+        _identityEventHandler.Exception = new InvalidOperationException("wrapped", new FakeDbException(isTransient: true));
 
         var disposition = await _handler.HandleAsync(
             Envelope(DefaultSources.IdentityHub, "user-created", new { userId = Guid.NewGuid() }),
@@ -193,7 +207,7 @@ public class RabbitMqEventHandlerTests
     [Test]
     public void HandleAsync_NonTransientDatabaseFailure_Throws()
     {
-        _appUserService.Exception = new FakeDbException(isTransient: false);
+        _identityEventHandler.Exception = new FakeDbException(isTransient: false);
 
         Assert.ThrowsAsync<FakeDbException>(() => _handler.HandleAsync(
             Envelope(DefaultSources.IdentityHub, "user-created", new { userId = Guid.NewGuid() }),
@@ -201,71 +215,7 @@ public class RabbitMqEventHandlerTests
     }
 
     [Test]
-    public async Task HandleAsync_InvalidUserId_Rejects()
-    {
-        var disposition = await _handler.HandleAsync(
-            Envelope(DefaultSources.IdentityHub, "user-created", new { userId = "not-a-guid" }),
-            CancellationToken.None);
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(disposition, Is.EqualTo(MessageDisposition.Reject));
-            Assert.That(_appUserService.Synced, Is.Null);
-        });
-    }
-
-    [Test]
-    public async Task HandleAsync_ContentOfWrongShape_Rejects()
-    {
-        var disposition = await _handler.HandleAsync(
-            Envelope(DefaultSources.IdentityHub, "user-created", new { userId = 42 }),
-            CancellationToken.None);
-
-        Assert.That(disposition, Is.EqualTo(MessageDisposition.Reject));
-    }
-
-    [Test]
-    public async Task HandleAsync_UnknownContentVersion_Rejects()
-    {
-        var disposition = await _handler.HandleAsync(
-            Envelope(DefaultSources.IdentityHub, "user-created", new { userId = Guid.NewGuid() }, contentVersion: "2.0"),
-            CancellationToken.None);
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(disposition, Is.EqualTo(MessageDisposition.Reject));
-            Assert.That(_appUserService.Synced, Is.Null);
-        });
-    }
-
-    [Test]
-    public async Task HandleAsync_ServiceFailure_Rejects()
-    {
-        _appUserService.Result = MethodResponse<bool>.Failure(new Error(ErrorDefaults.Codes.SaveFailed, ErrorDefaults.Messages.SaveFailed));
-
-        var disposition = await _handler.HandleAsync(
-            Envelope(DefaultSources.IdentityHub, "user-created", new { userId = Guid.NewGuid() }),
-            CancellationToken.None);
-
-        Assert.That(disposition, Is.EqualTo(MessageDisposition.Reject));
-    }
-
-    [Test]
-    public async Task HandleAsync_UnsupportedIdentityAction_Acks()
-    {
-        var disposition = await _handler.HandleAsync(
-            Envelope(DefaultSources.IdentityHub, "email-user-verify", new { userId = Guid.NewGuid() }, contentVersion: "9.0"),
-            CancellationToken.None);
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(disposition, Is.EqualTo(MessageDisposition.Ack));
-            Assert.That(_appUserService.Synced, Is.Null);
-        });
-    }
-
-    [Test]
-    public async Task HandleAsync_OtherSource_IsIgnoredAndAcked()
+    public async Task HandleAsync_OtherSource_IsAckedWithoutIdentityHandling()
     {
         var disposition = await _handler.HandleAsync(
             Envelope("other-service", "user-created", new { userId = Guid.NewGuid() }),
@@ -274,8 +224,7 @@ public class RabbitMqEventHandlerTests
         Assert.Multiple(() =>
         {
             Assert.That(disposition, Is.EqualTo(MessageDisposition.Ack));
-            Assert.That(_appUserService.Synced, Is.Null);
-            Assert.That(_appUserService.RemovedId, Is.Null);
+            Assert.That(_identityEventHandler.Called, Is.False);
         });
     }
 
@@ -284,47 +233,29 @@ public class RabbitMqEventHandlerTests
         public override bool IsTransient => isTransient;
     }
 
-    private class FakeAppUserService : IAppUserService
+    private class FakeIdentityEventHandler : IIdentityEventHandler
     {
-        public Guid? MessageId { get; private set; }
-        public AppUser? Synced { get; private set; }
-        public Guid? RemovedId { get; private set; }
-        public IMethodResponse<bool> Result { get; set; } = MethodResponse<bool>.Success(true);
+        public bool Called { get; private set; }
+        public string? MessageId { get; private set; }
+        public string? Action { get; private set; }
+        public string? ContentVersion { get; private set; }
+        public AppUser? AppUser { get; private set; }
+        public MessageHandlingResult Result { get; set; } = MessageHandlingResult.Applied;
         public Exception? Exception { get; set; }
 
-        public Task<IMethodResponse<bool>> SyncFromIdentityAsync(Guid messageId, AppUser appUser)
+        public Task<MessageHandlingResult> HandleAsync(string messageId, string action, string contentVersion, AppUser? appUser)
         {
             if (Exception != null)
             {
                 throw Exception;
             }
 
+            Called = true;
             MessageId = messageId;
-            Synced = appUser;
+            Action = action;
+            ContentVersion = contentVersion;
+            AppUser = appUser;
             return Task.FromResult(Result);
         }
-
-        public Task<IMethodResponse<bool>> RemoveFromIdentityAsync(Guid messageId, Guid id)
-        {
-            MessageId = messageId;
-            RemovedId = id;
-            return Task.FromResult(Result);
-        }
-
-        public Task<IMethodResponse<IEnumerable<AppUser>>> GetAllAsync(Guid actor = default) => throw new NotSupportedException();
-
-        public Task<IMethodResponse<IEnumerable<AppUser>>> GetAllByPageAsync(int pageNr, int pageSize, Guid actor = default) => throw new NotSupportedException();
-
-        public Task<IMethodResponse<int>> GetCountAsync(Guid actor = default) => throw new NotSupportedException();
-
-        public Task<IMethodResponse<bool>> ExistsAsync(Guid id, Guid actor = default) => throw new NotSupportedException();
-
-        public Task<IMethodResponse<AppUser>> GetByIdAsync(Guid id, Guid actor = default) => throw new NotSupportedException();
-
-        public Task<IMethodResponse<AppUser>> CreateAsync(AppUser entity, Guid actor = default) => throw new NotSupportedException();
-
-        public Task<IMethodResponse<AppUser>> UpdateAsync(Guid id, AppUser entity, string? expectedConcurrencyToken = null, Guid actor = default) => throw new NotSupportedException();
-
-        public Task<IMethodResponse<bool>> RemoveAsync(Guid id, string? expectedConcurrencyToken = null, Guid actor = default) => throw new NotSupportedException();
     }
 }

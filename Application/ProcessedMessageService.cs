@@ -11,16 +11,33 @@ public class ProcessedMessageService(
     IBaseUow uow) : IProcessedMessageService
 {
     public static readonly TimeSpan Retention = TimeSpan.FromDays(7);
+    public const int BatchSize = 1000;
 
     public async Task<IMethodResponse<int>> RemoveExpiredAsync()
     {
-        var removed = await processedMessageRepository.RemoveProcessedBeforeAsync(DateTimeOffset.UtcNow - Retention);
-        if (removed == 0)
-        {
-            return MethodResponse<int>.Success(0);
-        }
+        var cutoff = DateTimeOffset.UtcNow - Retention;
+        var removed = 0;
 
-        var saved = await uow.TrySaveChangesAsync();
-        return saved.Successful ? MethodResponse<int>.Success(removed) : saved;
+        while (true)
+        {
+            var batch = await processedMessageRepository.GetIdsProcessedBeforeAsync(cutoff, BatchSize);
+            if (batch.Count == 0)
+            {
+                return MethodResponse<int>.Success(removed);
+            }
+
+            processedMessageRepository.Remove(batch);
+            var saved = await uow.TrySaveChangesAsync();
+            if (!saved.Successful)
+            {
+                return saved;
+            }
+
+            removed += batch.Count;
+            if (batch.Count < BatchSize)
+            {
+                return MethodResponse<int>.Success(removed);
+            }
+        }
     }
 }

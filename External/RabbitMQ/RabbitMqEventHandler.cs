@@ -1,6 +1,5 @@
 using System.Data.Common;
 using System.Text.Json;
-using Base.Contracts.DTO;
 using Base.Contracts.Message;
 using Base.Keycloak.Events;
 using Base.Message;
@@ -15,8 +14,6 @@ public class RabbitMqEventHandler(
     IServiceScopeFactory scopeFactory,
     ILogger<RabbitMqEventHandler> logger)
 {
-    private const string IdentityContentVersion = "1.0";
-
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -29,7 +26,13 @@ public class RabbitMqEventHandler(
         {
             try
             {
-                return await HandleIdentityEventAsync(@event);
+                using var scope = scopeFactory.CreateScope();
+                var result = await scope.ServiceProvider.GetRequiredService<IIdentityEventHandler>().HandleAsync(
+                    @event.Id,
+                    @event.Action,
+                    @event.ContentVersion,
+                    ReadAppUser(@event.Content));
+                return ToDisposition(@event, result);
             }
             catch (Exception exception) when (IsTransientDatabaseFailure(exception))
             {
@@ -45,73 +48,47 @@ public class RabbitMqEventHandler(
         return MessageDisposition.Ack;
     }
 
-    private async Task<MessageDisposition> HandleIdentityEventAsync(IBaseEventEnvelope<JsonElement> @event)
+    private MessageDisposition ToDisposition(IBaseEventEnvelope<JsonElement> @event, MessageHandlingResult result)
     {
-        var isUserSync = @event.Action is "user-created" or "user-updated" or "user-enabled" or "user-disabled";
-        if (!isUserSync && @event.Action != "user-deleted")
+        switch (result)
         {
-            logger.LogDebug("Ignoring unsupported identity event action {EventAction}.", @event.Action);
-            return MessageDisposition.Ack;
+            case MessageHandlingResult.Applied:
+                logger.LogInformation("Applied identity event {MessageId} ({EventAction}).", @event.Id, @event.Action);
+                return MessageDisposition.Ack;
+            case MessageHandlingResult.AlreadyProcessed:
+                logger.LogInformation("Skipped already processed identity event {MessageId}.", @event.Id);
+                return MessageDisposition.Ack;
+            case MessageHandlingResult.Ignored:
+                logger.LogDebug("Ignoring unsupported identity event action {EventAction}.", @event.Action);
+                return MessageDisposition.Ack;
+            case MessageHandlingResult.Retry:
+                logger.LogWarning("Requeueing identity event {MessageId} ({EventAction}) after a concurrency conflict.", @event.Id, @event.Action);
+                return MessageDisposition.Requeue;
+            default:
+                logger.LogError(
+                    "Rejecting identity event {MessageId} ({EventAction}, contentVersion {ContentVersion}).",
+                    @event.Id,
+                    @event.Action,
+                    @event.ContentVersion);
+                return MessageDisposition.Reject;
         }
-
-        if (@event.ContentVersion != IdentityContentVersion)
-        {
-            logger.LogError(
-                "Rejecting identity event {MessageId} with unsupported contentVersion {ContentVersion}.",
-                @event.Id,
-                @event.ContentVersion);
-            return MessageDisposition.Reject;
-        }
-
-        var content = ReadUserEventContent(@event.Content);
-        if (!Guid.TryParse(@event.Id, out var messageId) || content == null || !Guid.TryParse(content.UserId, out var userId))
-        {
-            logger.LogError("Rejecting identity event {MessageId} with invalid id or content.", @event.Id);
-            return MessageDisposition.Reject;
-        }
-
-        using var scope = scopeFactory.CreateScope();
-        var appUserService = scope.ServiceProvider.GetRequiredService<IAppUserService>();
-        IMethodResponse<bool> result = isUserSync
-            ? await appUserService.SyncFromIdentityAsync(
-                messageId,
-                AppUser.FromIdentity(userId, content.Email, content.Username, content.FullName, content.Locale, content.TimeZone))
-            : await appUserService.RemoveFromIdentityAsync(messageId, userId);
-
-        if (!result.Successful)
-        {
-            logger.LogError(
-                "Rejecting identity event {MessageId} ({EventAction}) for Keycloak user {UserId}: {ErrorCode} {ErrorMessage}",
-                messageId,
-                @event.Action,
-                userId,
-                result.Error?.Code,
-                result.Error?.Message);
-            return MessageDisposition.Reject;
-        }
-
-        if (result.Value)
-        {
-            logger.LogInformation("Applied identity event {EventAction} for Keycloak user {UserId}.", @event.Action, userId);
-        }
-        else
-        {
-            logger.LogInformation("Skipped already processed identity event {MessageId}.", messageId);
-        }
-
-        return MessageDisposition.Ack;
     }
 
-    private static UserEventContent? ReadUserEventContent(JsonElement content)
+    private static AppUser? ReadAppUser(JsonElement content)
     {
+        UserEventContent? parsed;
         try
         {
-            return content.Deserialize<UserEventContent>(SerializerOptions);
+            parsed = content.Deserialize<UserEventContent>(SerializerOptions);
         }
         catch (JsonException)
         {
             return null;
         }
+
+        return parsed != null && Guid.TryParse(parsed.UserId, out var userId)
+            ? AppUser.FromIdentity(userId, parsed.Email, parsed.Username, parsed.FullName, parsed.Locale, parsed.TimeZone)
+            : null;
     }
 
     private static bool IsTransientDatabaseFailure(Exception? exception)

@@ -22,11 +22,12 @@ projection of the authenticated Keycloak user.
   idempotent handling through the `processed_messages` table.
 - MVC shell with login/logout and health endpoint.
 - API endpoints under `/api`.
-- Health endpoint at `/health`.
-- Swagger UI at `/swagger`.
+- Health endpoint at `/health` that checks PostgreSQL and RabbitMQ.
+- Swagger UI at `/swagger` in the Development environment only.
 - URL-segment API versioning with `/api/v1/...` routes.
-- Fixed-window API rate limiting.
-- PostgreSQL EF Core context with design-time factory for migrations.
+- Fixed-window API rate limiting, partitioned per user (JWT `sub`) or per remote IP.
+- PostgreSQL EF Core context with design-time factory for migrations. The template ships without
+  migrations; each product creates its own initial migration.
 - Environment-driven configuration loaded from `.env`.
 - Complete `.env.example` listing every variable for database, Redis, Keycloak, RabbitMQ, Glitchtip, and ports.
 - Central build settings in `Directory.Build.props`.
@@ -47,11 +48,14 @@ projection of the authenticated Keycloak user.
 ```text
 .
 |-- Application
+|   |-- AppUserIdentityMapper.cs
 |   |-- AppUserService.cs
+|   |-- IdentityEventHandler.cs
 |   `-- ProcessedMessageService.cs
 |-- Contracts
 |   |-- Application
 |   |   |-- IAppUserService.cs
+|   |   |-- IIdentityEventHandler.cs
 |   |   `-- IProcessedMessageService.cs
 |   |-- DataAccess
 |   |   |-- IAppUserRepository.cs
@@ -77,7 +81,8 @@ projection of the authenticated Keycloak user.
 |       |-- AppDbContext.cs
 |       `-- AppDbContextFactory.cs
 |-- Domain
-|   `-- AppUser.cs
+|   |-- AppUser.cs
+|   `-- MessageHandlingResult.cs
 |-- External
 |   |-- Cache
 |   |   `-- RedisCache.cs
@@ -92,10 +97,13 @@ projection of the authenticated Keycloak user.
 |   |       `-- AppUsersController.cs
 |   |-- Configuration
 |   |   |-- ApiRateLimitOptions.cs
+|   |   |-- ApiRateLimitPartition.cs
+|   |   |-- DatabaseHealthCheck.cs
 |   |   |-- DotEnvConfiguration.cs
 |   |   |-- GlitchtipConfiguration.cs
 |   |   |-- LoggingConfiguration.cs
 |   |   |-- ProcessedMessageCleanupService.cs
+|   |   |-- RabbitMqHealthCheck.cs
 |   |   |-- RateLimitPolicies.cs
 |   |   |-- RequiredConfiguration.cs
 |   |   `-- ServiceConfiguration.cs
@@ -105,10 +113,15 @@ projection of the authenticated Keycloak user.
 |   |   `-- Views
 |   `-- Program.cs
 |-- Tests
+|   |-- ApiRateLimitPartitionTests.cs
 |   |-- AppUserServiceTests.cs
 |   |-- AppUserTests.cs
+|   |-- AppUsersControllerTests.cs
+|   |-- HealthCheckTests.cs
+|   |-- IdentityEventHandlerTests.cs
 |   |-- MapperTests.cs
-|   `-- MessagingTests.cs
+|   |-- MessagingTests.cs
+|   `-- ProcessedMessageServiceTests.cs
 |-- .env.example
 |-- Directory.Build.props
 `-- alaasmagi-dotnet-template.sln
@@ -199,8 +212,16 @@ rejected writes come back as a failed `IMethodResponse<T>`. Normalization of ide
 fallback locale `et-EE` and time zone `Europe/Tallinn`) lives on the domain entity in
 `AppUser.FromIdentity`.
 
-`ProcessedMessageService` deletes processed message ids older than 7 days. `ProcessedMessageCleanupService`
-in `Web/Configuration` runs it once a day.
+`IdentityEventHandler` implements `IIdentityEventHandler` and decides how an identity event is applied:
+it ignores unsupported actions, rejects an unknown `contentVersion`, unreadable content or an invalid
+message `id`, and calls `IAppUserService`. It returns a provider-neutral `MessageHandlingResult`
+(`Applied`, `AlreadyProcessed`, `Ignored`, `Retry`, `Reject`). A `CONCURRENCY_CONFLICT` from the
+service is `Retry`, because a redelivery reads the current concurrency token; other failures are `Reject`.
+
+`ProcessedMessageService` deletes processed message ids older than 7 days in batches of 1000: it reads
+only the ids of a batch, stages their deletion and commits each batch through the UoW.
+`ProcessedMessageCleanupService` in `Web/Configuration` runs it once a day; `processed_at` is indexed for
+this query.
 
 ### `External`
 
@@ -224,14 +245,23 @@ RabbitMQ support is built on `alaasmagi.Base.Message` and `alaasmagi.Base.Messag
   returned as a failed `IMethodResponse<bool>` with code `PUBLISH_FAILED`.
 - `RabbitMqEventConsumer` inherits `RabbitMqDeliveryConsumerBase<JsonElement>` and consumes the queue named
   by `RABBITMQ_QUEUE`. Queue bindings are set up manually, not in code.
-- `RabbitMqEventHandler` handles incoming events and returns the delivery disposition. Keycloak user
-  lifecycle events (source `identity-hub`, actions `user-created`, `user-updated`, `user-enabled`,
-  `user-disabled`, `user-deleted`, `contentVersion` `1.0`) are read as `UserEventContent` from
-  `alaasmagi.Base.Keycloak.Events` and passed to `IAppUserService` with the envelope `id`.
-  - `Ack`: processed, already processed (duplicate `id`), unsupported identity action, or another source.
-  - `Requeue`: transient database failure (a `DbException` with `IsTransient`, e.g. connection or timeout).
-    The base class waits `RequeueDelay` (default 5 s) before requeueing.
-  - `Reject`: invalid id or content, unknown `contentVersion`, or any other failure.
+- `RabbitMqEventHandler` handles incoming events and returns the delivery disposition. It only reads
+  messages: Keycloak user lifecycle events (source `identity-hub`, actions `user-created`, `user-updated`,
+  `user-enabled`, `user-disabled`, `user-deleted`) are read as `UserEventContent` from
+  `alaasmagi.Base.Keycloak.Events`, turned into an `AppUser` and passed to `IIdentityEventHandler` with
+  the envelope `id`, `action` and `contentVersion`. The returned `MessageHandlingResult` is mapped to a
+  disposition:
+  - `Ack`: `Applied`, `AlreadyProcessed` (duplicate `id`), `Ignored` (unsupported identity action), or
+    another source.
+  - `Requeue`: `Retry` (concurrency conflict), or a transient database failure (a `DbException` with
+    `IsTransient`, e.g. connection or timeout). The base class waits `RequeueDelay` (default 5 s) before
+    requeueing.
+  - `Reject`: `Reject` (invalid id or content, unknown `contentVersion`, or any other failure).
+- Event ordering: the platform event contract does not define an ordering rule, so identity events are
+  applied in the order they are consumed. A requeued `user-updated` that is processed after a
+  `user-deleted` for the same user recreates that user.
+- A crashed consumer stops the host (the default `BackgroundServiceExceptionBehavior.StopHost`) instead of
+  leaving the app running without consuming. `ProcessedMessageCleanupService` catches its own failures.
 
 ### `Web`
 
@@ -257,8 +287,8 @@ Keycloak OpenID Connect with a cookie session. Authorization checks permissions 
 Operational endpoints:
 
 ```text
-GET /health
-GET /swagger
+GET /health    anonymous; Healthy only when PostgreSQL and RabbitMQ are reachable
+GET /swagger   Development environment only
 ```
 
 ## `alaasmagi.Base.*` Packages
@@ -428,6 +458,13 @@ The template supports both MVC and JSON API endpoints from one ASP.NET Core host
 existing Alaasmagi backends and keeps authentication, configuration, and dependency injection in one
 composition root.
 
+### Forwarded headers
+
+`X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` are accepted from any address
+(`KnownIPNetworks` and `KnownProxies` are cleared). The app must therefore be reachable only through the
+reverse proxy. A client that reaches it directly could spoof its IP (which also changes its rate limit
+partition), scheme and host.
+
 ### API versioning
 
 APIs use URL-segment versioning through `Asp.Versioning.Mvc` and `Asp.Versioning.Mvc.ApiExplorer`.
@@ -436,8 +473,11 @@ supported API version headers.
 
 ### API rate limiting
 
-API controllers use ASP.NET Core's built-in rate limiting middleware with a named fixed-window policy.
-Configure it with:
+API controllers use ASP.NET Core's built-in rate limiting middleware with the named policy
+`RateLimitPolicies.Api`. It is a partitioned fixed-window limiter: each authenticated caller gets their own
+window keyed by the JWT `sub`, and anonymous requests are partitioned by remote IP. `UseRateLimiter()`
+runs after `UseAuthorization()`, because API requests are authenticated with the bearer scheme there.
+Requests that fail authentication are rejected before they reach the limiter. Configure it with:
 
 ```text
 RATE_LIMIT_PERMIT_LIMIT
@@ -466,7 +506,8 @@ Run the web host:
 dotnet run --project Web/Web.csproj
 ```
 
-Create a migration after changing persistence entities:
+The template contains no migrations. In a product created from it, create the initial migration first and
+a new one after changing persistence entities:
 
 ```bash
 dotnet ef migrations add DbMigration-v1 --project DataAccess/DataAccess.csproj --startup-project Web/Web.csproj --context AppDbContext

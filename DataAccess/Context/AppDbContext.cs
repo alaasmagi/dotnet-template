@@ -27,6 +27,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<ProcessedMessageEntity>(entity =>
         {
             entity.ToTable("processed_messages");
+            entity.HasIndex(e => e.ProcessedAt);
         });
     }
 }

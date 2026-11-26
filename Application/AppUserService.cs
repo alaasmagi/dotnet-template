@@ -8,19 +8,6 @@ using Domain;
 
 namespace Application;
 
-public class AppUserIdentityMapper : IMapper<AppUser, AppUser>
-{
-    public AppUser? Map(AppUser? entity)
-    {
-        return entity;
-    }
-
-    public IEnumerable<AppUser>? Map(IEnumerable<AppUser>? entities)
-    {
-        return entities;
-    }
-}
-
 public class AppUserService(
     IAppUserRepository appUserRepository,
     IProcessedMessageRepository processedMessageRepository,

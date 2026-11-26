@@ -92,6 +92,7 @@ public static class ServiceConfiguration
     {
         services.AddScoped<IAppUserService, AppUserService>();
         services.AddScoped<IProcessedMessageService, ProcessedMessageService>();
+        services.AddScoped<IIdentityEventHandler, IdentityEventHandler>();
         services.AddHostedService<ProcessedMessageCleanupService>();
 
         return services;
@@ -121,11 +122,6 @@ public static class ServiceConfiguration
         RabbitMqOptions rabbitMqOptions,
         AppMessagingOptions appMessagingOptions)
     {
-        services.Configure<HostOptions>(options =>
-        {
-            options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore;
-        });
-
         services.AddSingleton(appMessagingOptions);
         services.AddRabbitMqPublisher(rabbitMqOptions);
         services.AddSingleton<IAppEventPublisher, External.RabbitMQ.RabbitMqEventPublisher>();
@@ -152,7 +148,9 @@ public static class ServiceConfiguration
         this IServiceCollection services,
         ApiRateLimitOptions apiRateLimitOptions)
     {
-        services.AddHealthChecks();
+        services.AddHealthChecks()
+            .AddCheck<DatabaseHealthCheck>("database")
+            .AddCheck<RabbitMqHealthCheck>("rabbitmq");
         services.AddEndpointsApiExplorer();
         services.AddSwaggerGen();
         services
@@ -171,13 +169,14 @@ public static class ServiceConfiguration
         services.AddRateLimiter(options =>
         {
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-            options.AddFixedWindowLimiter(RateLimitPolicies.Api, limiterOptions =>
-            {
-                limiterOptions.PermitLimit = apiRateLimitOptions.PermitLimit;
-                limiterOptions.Window = TimeSpan.FromSeconds(apiRateLimitOptions.WindowSeconds);
-                limiterOptions.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
-                limiterOptions.QueueLimit = apiRateLimitOptions.QueueLimit;
-            });
+            options.AddPolicy(RateLimitPolicies.Api, context =>
+                RateLimitPartition.GetFixedWindowLimiter(ApiRateLimitPartition.KeyFor(context), _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = apiRateLimitOptions.PermitLimit,
+                    Window = TimeSpan.FromSeconds(apiRateLimitOptions.WindowSeconds),
+                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                    QueueLimit = apiRateLimitOptions.QueueLimit
+                }));
         });
 
         return services;

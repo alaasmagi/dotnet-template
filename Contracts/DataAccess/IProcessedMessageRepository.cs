@@ -9,5 +9,7 @@ public interface IProcessedMessageRepository
 
     void Add(Guid messageId);
 
-    Task<int> RemoveProcessedBeforeAsync(DateTimeOffset cutoff);
+    Task<IReadOnlyList<Guid>> GetIdsProcessedBeforeAsync(DateTimeOffset cutoff, int count);
+
+    void Remove(IEnumerable<Guid> messageIds);
 }

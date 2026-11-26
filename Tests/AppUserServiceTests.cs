@@ -188,17 +188,25 @@ public class AppUserServiceTests
     {
         public HashSet<Guid> Existing { get; } = [];
         public List<Guid> Added { get; } = [];
-        public DateTimeOffset? RemovedBefore { get; private set; }
-        public int RemoveCount { get; set; }
+        public List<Guid> Expired { get; } = [];
+        public DateTimeOffset? Cutoff { get; private set; }
+        public List<int> RemovedBatchSizes { get; } = [];
 
         public Task<bool> ExistsAsync(Guid messageId) => Task.FromResult(Existing.Contains(messageId));
 
         public void Add(Guid messageId) => Added.Add(messageId);
 
-        public Task<int> RemoveProcessedBeforeAsync(DateTimeOffset cutoff)
+        public Task<IReadOnlyList<Guid>> GetIdsProcessedBeforeAsync(DateTimeOffset cutoff, int count)
         {
-            RemovedBefore = cutoff;
-            return Task.FromResult(RemoveCount);
+            Cutoff = cutoff;
+            return Task.FromResult<IReadOnlyList<Guid>>(Expired.Take(count).ToList());
+        }
+
+        public void Remove(IEnumerable<Guid> messageIds)
+        {
+            var removed = messageIds.ToList();
+            Expired.RemoveAll(removed.Contains);
+            RemovedBatchSizes.Add(removed.Count);
         }
     }
 

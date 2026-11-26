@@ -154,7 +154,7 @@ Use what the package already provides before writing anything new:
 - **User scoping** is automatic for entities implementing `IBaseEntityUserId<TKey>` - never add manual user filters on top.
 - **Expected failures return `IMethodResponse<T>`** (`MethodResponse`, `Error`, `ErrorDefaults` from `Base.DTO`) - no custom result/error types. Exceptions (`BaseException` / `HttpException`) only for unexpected failures.
 - **Cache:** callers use `IAppCache` (incl. `GetOrSetAsync` for cache-aside); the Redis store in `External/Cache` inherits `BaseCache`.
-- **Messaging:** publish with `BaseEventEnvelope<TContent>`, consume with `RabbitMqConsumerBase<TContent>`; RabbitMQ specifics only in External/`Configuration/`.
+- **Messaging:** publish with `BaseEventEnvelope<TContent>`, consume with `RabbitMqConsumerBase<TContent>` (ack or reject) or `RabbitMqDeliveryConsumerBase<TContent>` (ack, requeue or reject per message); RabbitMQ specifics only in External/`Configuration/`.
 - **Keycloak:** auth, role claims and admin API go through `Base.Keycloak` helpers - never hand-write JWT/OIDC setup.
 - All `alaasmagi.Base.*` packages are kept on the same version. Updating one means updating all.
 - If the base package is missing something that would be reusable across projects, tell me instead of building it locally - it may belong in the package.

@@ -23,16 +23,20 @@ else
 app.UseHttpsRedirection();
 app.UseRouting();
 
-app.UseSwagger();
-app.UseSwaggerUI(options =>
+if (app.Environment.IsDevelopment())
 {
-    options.SwaggerEndpoint("/swagger/v1/swagger.json", "Alaasmagi Dotnet Template API v1");
-});
-
-app.UseRateLimiter();
+    app.UseSwagger();
+    app.UseSwaggerUI(options =>
+    {
+        options.SwaggerEndpoint("/swagger/v1/swagger.json", "Alaasmagi Dotnet Template API v1");
+    });
+}
 
 app.UseAuthentication();
 app.UseAuthorization();
+
+// After authorization, which authenticates API calls with the bearer scheme, so the limiter can partition by sub.
+app.UseRateLimiter();
 
 app.MapStaticAssets();
 app.MapHealthChecks("/health").AllowAnonymous();

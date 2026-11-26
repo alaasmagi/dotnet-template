@@ -28,12 +28,19 @@ public class ProcessedMessageRepository : IProcessedMessageRepository
         });
     }
 
-    public async Task<int> RemoveProcessedBeforeAsync(DateTimeOffset cutoff)
+    public async Task<IReadOnlyList<Guid>> GetIdsProcessedBeforeAsync(DateTimeOffset cutoff, int count)
     {
-        var expired = await _dbContext.ProcessedMessages
+        return await _dbContext.ProcessedMessages
             .Where(message => message.ProcessedAt < cutoff)
+            .OrderBy(message => message.ProcessedAt)
+            .Select(message => message.MessageId)
+            .Take(count)
             .ToListAsync();
-        _dbContext.ProcessedMessages.RemoveRange(expired);
-        return expired.Count;
+    }
+
+    public void Remove(IEnumerable<Guid> messageIds)
+    {
+        // Key-only stubs, so the rows are deleted without loading them.
+        _dbContext.ProcessedMessages.RemoveRange(messageIds.Select(id => new ProcessedMessageEntity { MessageId = id }));
     }
 }
