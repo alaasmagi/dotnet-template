@@ -10,6 +10,7 @@ public class AppDbContext : DbContext
     }
 
     public DbSet<AppUserEntity> AppUsers => Set<AppUserEntity>();
+    public DbSet<ProcessedMessageEntity> ProcessedMessages => Set<ProcessedMessageEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -21,6 +22,11 @@ public class AppDbContext : DbContext
             entity.ToTable("AppUsers");
             entity.HasIndex(e => e.Email);
             entity.HasIndex(e => e.Username);
+        });
+
+        modelBuilder.Entity<ProcessedMessageEntity>(entity =>
+        {
+            entity.ToTable("processed_messages");
         });
     }
 }

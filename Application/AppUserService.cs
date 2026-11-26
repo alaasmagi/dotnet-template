@@ -23,12 +23,18 @@ public class AppUserIdentityMapper : IMapper<AppUser, AppUser>
 
 public class AppUserService(
     IAppUserRepository appUserRepository,
+    IProcessedMessageRepository processedMessageRepository,
     IBaseUow uow,
     IMapper<AppUser, AppUser> mapper)
     : BaseService<AppUser, AppUser, IAppUserRepository>(uow, appUserRepository, mapper), IAppUserService
 {
-    public async Task<IMethodResponse<AppUser>> SyncFromIdentityAsync(AppUser appUser)
+    public async Task<IMethodResponse<bool>> SyncFromIdentityAsync(Guid messageId, AppUser appUser)
     {
+        if (await processedMessageRepository.ExistsAsync(messageId))
+        {
+            return MethodResponse<bool>.Success(false);
+        }
+
         var existing = await ServiceRepository.GetByIdAsync(appUser.Id);
 
         IMethodResponse<AppUser> staged;
@@ -42,36 +48,56 @@ public class AppUserService(
         }
         else
         {
-            return existing;
+            return MethodResponse<bool>.Failure(existing.Error!);
         }
 
         if (!staged.Successful)
         {
-            return staged;
+            return MethodResponse<bool>.Failure(staged.Error!);
         }
 
-        var saved = await ServiceUow.TrySaveChangesAsync();
-        return saved.Successful ? staged : MethodResponse<AppUser>.Failure(saved.Error!);
+        return await SaveWithMessageIdAsync(messageId);
     }
 
-    public async Task<IMethodResponse<bool>> RemoveFromIdentityAsync(Guid id)
+    public async Task<IMethodResponse<bool>> RemoveFromIdentityAsync(Guid messageId, Guid id)
     {
-        var existing = await ServiceRepository.GetByIdAsync(id);
-        if (!existing.Successful)
+        if (await processedMessageRepository.ExistsAsync(messageId))
         {
-            // An already missing user is the desired end state of a delete event.
-            return existing.Error?.Code == ErrorDefaults.Codes.NotFound
-                ? MethodResponse<bool>.Success(false)
-                : MethodResponse<bool>.Failure(existing.Error!);
+            return MethodResponse<bool>.Success(false);
         }
 
-        var removed = await ServiceRepository.RemoveAsync(id, existing.Value!.ConcurrencyToken);
-        if (!removed.Successful)
+        var existing = await ServiceRepository.GetByIdAsync(id);
+        if (existing.Successful)
         {
-            return removed;
+            var removed = await ServiceRepository.RemoveAsync(id, existing.Value!.ConcurrencyToken);
+            if (!removed.Successful)
+            {
+                return removed;
+            }
         }
+        // An already missing user is the desired end state of a delete event.
+        else if (existing.Error?.Code != ErrorDefaults.Codes.NotFound)
+        {
+            return MethodResponse<bool>.Failure(existing.Error!);
+        }
+
+        return await SaveWithMessageIdAsync(messageId);
+    }
+
+    private async Task<IMethodResponse<bool>> SaveWithMessageIdAsync(Guid messageId)
+    {
+        // Saved in the same transaction as the staged AppUser change.
+        processedMessageRepository.Add(messageId);
 
         var saved = await ServiceUow.TrySaveChangesAsync();
-        return saved.Successful ? removed : MethodResponse<bool>.Failure(saved.Error!);
+        if (saved.Successful)
+        {
+            return MethodResponse<bool>.Success(true);
+        }
+
+        // A concurrent delivery of the same message wins the primary key, which makes this one a duplicate.
+        return await processedMessageRepository.ExistsAsync(messageId)
+            ? MethodResponse<bool>.Success(false)
+            : MethodResponse<bool>.Failure(saved.Error!);
     }
 }

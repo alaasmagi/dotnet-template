@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Threading.RateLimiting;
 using Application;
 using Asp.Versioning;
@@ -6,7 +5,7 @@ using Base.Cache;
 using Base.Contracts.DataAccess;
 using Base.Contracts.DTO;
 using Base.Contracts.Cache;
-using Base.Contracts.Message;
+using Base.Authorization;
 using Base.Keycloak.Authentication;
 using Base.Message.RabbitMQ;
 using Contracts.Application;
@@ -83,6 +82,7 @@ public static class ServiceConfiguration
         services.AddScoped<IMapper<AppUserDto, AppUser>, AppUserDtoMapper>();
 
         services.AddScoped<IAppUserRepository, AppUserRepository>();
+        services.AddScoped<IProcessedMessageRepository, ProcessedMessageRepository>();
         services.AddScoped<IBaseUow, DataAccessUow>();
 
         return services;
@@ -91,6 +91,8 @@ public static class ServiceConfiguration
     private static IServiceCollection AddApplicationServices(this IServiceCollection services)
     {
         services.AddScoped<IAppUserService, AppUserService>();
+        services.AddScoped<IProcessedMessageService, ProcessedMessageService>();
+        services.AddHostedService<ProcessedMessageCleanupService>();
 
         return services;
     }
@@ -100,7 +102,10 @@ public static class ServiceConfiguration
         KeycloakOptions keycloakOptions)
     {
         services.AddHttpContextAccessor();
-        services.AddKeycloakOidc(keycloakOptions);
+        services.AddKeycloakOidc(keycloakOptions)
+            .AddKeycloakJwtBearer(keycloakOptions);
+        services.AddPermissionAuthorization();
+        // Overrides the deny-by-default fallback of AddPermissionAuthorization so MVC pages keep requiring only a login.
         services.AddAuthorization(options =>
         {
             options.FallbackPolicy = new AuthorizationPolicyBuilder()
@@ -124,7 +129,7 @@ public static class ServiceConfiguration
         services.AddSingleton(appMessagingOptions);
         services.AddRabbitMqPublisher(rabbitMqOptions);
         services.AddSingleton<IAppEventPublisher, External.RabbitMQ.RabbitMqEventPublisher>();
-        services.AddSingleton<IBaseEventHandler<JsonElement>, RabbitMqEventHandler>();
+        services.AddSingleton<RabbitMqEventHandler>();
         services.AddRabbitMqConsumer<RabbitMqEventConsumer>();
 
         return services;

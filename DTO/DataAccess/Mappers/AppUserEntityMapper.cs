@@ -15,6 +15,7 @@ public class AppUserEntityMapper : IMapper<AppUser, AppUserEntity>
             Username = entity.Username,
             FullName = entity.FullName,
             Locale = entity.Locale,
+            TimeZone = entity.TimeZone,
         };
     }
 
@@ -33,6 +34,7 @@ public class AppUserEntityMapper : IMapper<AppUser, AppUserEntity>
             Username = entity.Username,
             FullName = entity.FullName,
             Locale = entity.Locale,
+            TimeZone = entity.TimeZone,
         };
     }
 

@@ -15,7 +15,8 @@ public class MapperTests
         Email = "user@example.com",
         Username = "user",
         FullName = "Full Name",
-        Locale = "et"
+        Locale = "en-GB",
+        TimeZone = "Europe/London"
     };
 
     [Test]
@@ -35,6 +36,7 @@ public class MapperTests
             Assert.That(result.Username, Is.EqualTo(appUser.Username));
             Assert.That(result.FullName, Is.EqualTo(appUser.FullName));
             Assert.That(result.Locale, Is.EqualTo(appUser.Locale));
+            Assert.That(result.TimeZone, Is.EqualTo(appUser.TimeZone));
         });
     }
 
@@ -65,6 +67,7 @@ public class MapperTests
             Assert.That(result.ConcurrencyToken, Is.EqualTo(appUser.ConcurrencyToken));
             Assert.That(result.Email, Is.EqualTo(appUser.Email));
             Assert.That(result.Locale, Is.EqualTo(appUser.Locale));
+            Assert.That(result.TimeZone, Is.EqualTo(appUser.TimeZone));
         });
     }
 
@@ -81,6 +84,7 @@ public class MapperTests
             Assert.That(result!.Id, Is.Not.EqualTo(Guid.Empty));
             Assert.That(result.ConcurrencyToken, Is.Empty);
             Assert.That(result.Locale, Is.EqualTo(AppUser.DefaultLocale));
+            Assert.That(result.TimeZone, Is.EqualTo(AppUser.DefaultTimeZone));
         });
     }
 }

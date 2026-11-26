@@ -1,4 +1,6 @@
+using System.Data.Common;
 using System.Text.Json;
+using Base.Contracts.DTO;
 using Base.Contracts.Message;
 using Base.Keycloak.Events;
 using Base.Message;
@@ -11,82 +13,117 @@ namespace External.RabbitMQ;
 
 public class RabbitMqEventHandler(
     IServiceScopeFactory scopeFactory,
-    ILogger<RabbitMqEventHandler> logger) : IBaseEventHandler<JsonElement>
+    ILogger<RabbitMqEventHandler> logger)
 {
+    private const string IdentityContentVersion = "1.0";
+
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         PropertyNameCaseInsensitive = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    public async Task HandleAsync(IBaseEventEnvelope<JsonElement> @event, CancellationToken ct)
+    public async Task<MessageDisposition> HandleAsync(IBaseEventEnvelope<JsonElement> @event, CancellationToken ct)
     {
         if (string.Equals(@event.Source, DefaultSources.IdentityHub, StringComparison.Ordinal))
         {
-            await HandleIdentityEventAsync(@event);
-            return;
+            try
+            {
+                return await HandleIdentityEventAsync(@event);
+            }
+            catch (Exception exception) when (IsTransientDatabaseFailure(exception))
+            {
+                logger.LogWarning(exception, "Transient database failure for message {MessageId}, requeueing.", @event.Id);
+                return MessageDisposition.Requeue;
+            }
         }
 
         logger.LogInformation(
             "Received event {EventAction} from {EventSource}. Add a handler branch for this event.",
             @event.Action,
             @event.Source);
+        return MessageDisposition.Ack;
     }
 
-    private async Task HandleIdentityEventAsync(IBaseEventEnvelope<JsonElement> @event)
+    private async Task<MessageDisposition> HandleIdentityEventAsync(IBaseEventEnvelope<JsonElement> @event)
     {
-        switch (@event.Action)
+        var isUserSync = @event.Action is "user-created" or "user-updated" or "user-enabled" or "user-disabled";
+        if (!isUserSync && @event.Action != "user-deleted")
         {
-            case "user-created":
-            case "user-updated":
-            case "user-enabled":
-            case "user-disabled":
-            {
-                var content = ReadUserEventContent(@event, out var userId);
-                using var scope = scopeFactory.CreateScope();
-                var appUserService = scope.ServiceProvider.GetRequiredService<IAppUserService>();
-                var result = await appUserService.SyncFromIdentityAsync(
-                    AppUser.FromIdentity(userId, content.Email, content.Username, content.FullName, content.Locale));
-                if (!result.Successful)
-                {
-                    throw new InvalidOperationException(
-                        $"Could not synchronize Keycloak user {userId}: {result.Error?.Code} {result.Error?.Message}");
-                }
+            logger.LogDebug("Ignoring unsupported identity event action {EventAction}.", @event.Action);
+            return MessageDisposition.Ack;
+        }
 
-                logger.LogInformation("Synchronized Keycloak user {UserId}.", userId);
-                break;
-            }
+        if (@event.ContentVersion != IdentityContentVersion)
+        {
+            logger.LogError(
+                "Rejecting identity event {MessageId} with unsupported contentVersion {ContentVersion}.",
+                @event.Id,
+                @event.ContentVersion);
+            return MessageDisposition.Reject;
+        }
 
-            case "user-deleted":
-            {
-                ReadUserEventContent(@event, out var userId);
-                using var scope = scopeFactory.CreateScope();
-                var appUserService = scope.ServiceProvider.GetRequiredService<IAppUserService>();
-                var result = await appUserService.RemoveFromIdentityAsync(userId);
-                if (!result.Successful)
-                {
-                    throw new InvalidOperationException(
-                        $"Could not delete Keycloak user projection {userId}: {result.Error?.Code} {result.Error?.Message}");
-                }
+        var content = ReadUserEventContent(@event.Content);
+        if (!Guid.TryParse(@event.Id, out var messageId) || content == null || !Guid.TryParse(content.UserId, out var userId))
+        {
+            logger.LogError("Rejecting identity event {MessageId} with invalid id or content.", @event.Id);
+            return MessageDisposition.Reject;
+        }
 
-                logger.LogInformation("Deleted Keycloak user projection {UserId}.", userId);
-                break;
-            }
+        using var scope = scopeFactory.CreateScope();
+        var appUserService = scope.ServiceProvider.GetRequiredService<IAppUserService>();
+        IMethodResponse<bool> result = isUserSync
+            ? await appUserService.SyncFromIdentityAsync(
+                messageId,
+                AppUser.FromIdentity(userId, content.Email, content.Username, content.FullName, content.Locale, content.TimeZone))
+            : await appUserService.RemoveFromIdentityAsync(messageId, userId);
 
-            default:
-                logger.LogDebug("Ignoring unsupported identity event action {EventAction}.", @event.Action);
-                break;
+        if (!result.Successful)
+        {
+            logger.LogError(
+                "Rejecting identity event {MessageId} ({EventAction}) for Keycloak user {UserId}: {ErrorCode} {ErrorMessage}",
+                messageId,
+                @event.Action,
+                userId,
+                result.Error?.Code,
+                result.Error?.Message);
+            return MessageDisposition.Reject;
+        }
+
+        if (result.Value)
+        {
+            logger.LogInformation("Applied identity event {EventAction} for Keycloak user {UserId}.", @event.Action, userId);
+        }
+        else
+        {
+            logger.LogInformation("Skipped already processed identity event {MessageId}.", messageId);
+        }
+
+        return MessageDisposition.Ack;
+    }
+
+    private static UserEventContent? ReadUserEventContent(JsonElement content)
+    {
+        try
+        {
+            return content.Deserialize<UserEventContent>(SerializerOptions);
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 
-    private static UserEventContent ReadUserEventContent(IBaseEventEnvelope<JsonElement> @event, out Guid userId)
+    private static bool IsTransientDatabaseFailure(Exception? exception)
     {
-        var content = @event.Content.Deserialize<UserEventContent>(SerializerOptions);
-        if (content == null || !Guid.TryParse(content.UserId, out userId))
+        for (; exception != null; exception = exception.InnerException)
         {
-            throw new InvalidOperationException($"User event contains invalid userId '{content?.UserId}'.");
+            if (exception is DbException { IsTransient: true })
+            {
+                return true;
+            }
         }
 
-        return content;
+        return false;
     }
 }

@@ -18,10 +18,15 @@ public class RabbitMqEventPublisher(
         TContent content,
         CancellationToken ct = default)
     {
+        if (content is BaseNotificationContent notification)
+        {
+            notification.Validate();
+        }
+
         // The app slug is both source and tenant, giving routing key <slug>.<slug>.<action>.
         var envelope = BaseEventEnvelope<TContent>.Create(
-            source: options.Source,
-            tenant: options.Source,
+            source: options.AppSlug,
+            tenant: options.AppSlug,
             action: action,
             contentVersion: contentVersion,
             content: content);

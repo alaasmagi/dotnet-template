@@ -23,4 +23,8 @@ public record AppUserDto
     [Required]
     [StringLength(16)]
     public string Locale { get; init; } = Domain.AppUser.DefaultLocale;
+
+    [Required]
+    [StringLength(64)]
+    public string TimeZone { get; init; } = Domain.AppUser.DefaultTimeZone;
 }

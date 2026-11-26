@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using Base.Domain;
+using Domain;
 
 namespace DTO.DataAccess;
 
@@ -19,5 +20,9 @@ public class AppUserEntity : BaseEntityWithMetaConcurrency
 
     [Required]
     [MaxLength(16)]
-    public string Locale { get; set; } = "en";
+    public string Locale { get; set; } = AppUser.DefaultLocale;
+
+    [Required]
+    [MaxLength(64)]
+    public string TimeZone { get; set; } = AppUser.DefaultTimeZone;
 }

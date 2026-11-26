@@ -37,8 +37,7 @@ public static class RequiredConfiguration
                 "Keycloak client secret",
                 "KEYCLOAK_CLIENT_SECRET"),
             RequireHttpsMetadata = !authority.StartsWith("http://localhost", StringComparison.OrdinalIgnoreCase) &&
-                                   !authority.StartsWith("http://127.0.0.1", StringComparison.OrdinalIgnoreCase),
-            IncludeClientRoles = true
+                                   !authority.StartsWith("http://127.0.0.1", StringComparison.OrdinalIgnoreCase)
         };
     }
 
@@ -86,10 +85,10 @@ public static class RequiredConfiguration
                 Environment.GetEnvironmentVariable("RABBITMQ_QUEUE"),
                 "RabbitMQ consumer queue",
                 "RABBITMQ_QUEUE"),
-            Source = Required(
-                Environment.GetEnvironmentVariable("APP_EVENT_SOURCE"),
-                "Event source and tenant of published events",
-                "APP_EVENT_SOURCE")
+            AppSlug = Required(
+                Environment.GetEnvironmentVariable("APP_SLUG"),
+                "App slug, the source and tenant of published messages",
+                "APP_SLUG")
         };
     }
 

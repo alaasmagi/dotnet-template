@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 > This file comes from a project template. Values in `<angle brackets>` are placeholders. If a placeholder you need is still unfilled, do not guess: ask me, or offer to fill it in from what is actually in the repo. Once confirmed, replace it in this file.
 
@@ -184,7 +184,15 @@ Write custom behavior only where the feature differs from generic CRUD or messag
 
 ## 8. Platform Integration
 <!-- Only if the project uses the shared hubs. -->
+### Contracts - HARD rules
+- The JWT contract (`<jwt-contract-location>`) and the event contract (`<event-contract-location>`) are the source of truth. Read the relevant one before any work on auth/claims or events.
+- Implement them exactly as written: same field names, types, casing, values, routing keys and structure. No renamed, added, removed, merged or "improved" fields, no local variants or workarounds in the app.
+- If a contract doesn't fit the task, seems wrong, is ambiguous, or doesn't cover what's needed - stop and tell me before implementing anything that depends on it. Explain what doesn't fit and why. Never change, extend or reinterpret a contract yourself.
+
+### Hubs
 - Auth goes through Keycloak (realm: `<app-slug>`). Never implement custom auth.
+- **API authentication uses JWT bearer tokens issued by Keycloak only.** No cookies, API keys, basic auth or any other scheme on API endpoints.
+- **MVC views** use Keycloak OpenID Connect login with a cookie session - the only exception. Never use the cookie scheme on API endpoints or the bearer scheme on MVC views.
 - Async communication goes through RabbitMQ using the `Base.Message` envelope. Do not define a new envelope or change exchange/queue topology in code - topology is set up manually.
 - **Errors:** no new exception hierarchies unless asked (see Section 7). Errors are reported to error-hub (GlitchTip), never only to the console. No `try/catch` unless the code can actually handle the error - never swallow exceptions.
 - Email is sent via email-hub commands (`<app-slug>.<action>`), never directly from the app.
